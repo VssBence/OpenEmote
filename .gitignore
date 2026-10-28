@@ -6,3 +6,4 @@ dist/
 OpenEmote.exe
 .venv/
 venv/
+releases/
