@@ -119,6 +119,7 @@ def main(argv=None):
     p = argparse.ArgumentParser(prog="openemote", description="Drive the Razer Seiren Emote display without Razer software.")
     p.add_argument("--layout", choices=list(LAYOUTS), default="mirror", help="pixel layout (see 'calibrate')")
     p.add_argument("--brightness", type=int, default=100, metavar="0-100")
+    p.add_argument("--tray", action="store_true", help="start the app hidden in the tray and play the playlist")
     sub = p.add_subparsers(dest="cmd", metavar="command")
 
     sub.add_parser("gui", help="open the graphical app (default)")
@@ -149,7 +150,7 @@ def main(argv=None):
 
     if args.cmd in (None, "gui"):
         from .gui import run
-        run(layout=args.layout, brightness=brightness)
+        run(layout=args.layout, brightness=brightness, start_hidden=args.tray)
         return
     if args.cmd == "list":
         cmd_list(args)

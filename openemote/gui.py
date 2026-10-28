@@ -10,10 +10,14 @@ import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
+from . import autostart
 from .device import DeviceError, EmoteDisplay
 from .font import text_steps
 from .frame import BLACK, HEIGHT, WIDTH, Frame, blank, to_hex
+from .mute import MuteWatcher
 from .presets import PRESETS, playlist
+
+MUTED_LABEL = "MUTED"
 
 CONFIG_DIR = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "OpenEmote"
 CONFIG = CONFIG_DIR / "settings.json"
@@ -82,8 +86,43 @@ def thumbnail_image(frame: Frame) -> tk.PhotoImage:
     return img
 
 
+class Switch(tk.Frame):
+    """On/off toggle switch with a label; clicking either flips the variable."""
+
+    BG = "#1e1e26"
+
+    def __init__(self, parent, variable: tk.BooleanVar, text: str, on_change=None):
+        super().__init__(parent, bg=self.BG, cursor="hand2")
+        self.variable, self.text, self.on_change = variable, text, on_change
+        self.canvas = tk.Canvas(self, width=40, height=22, bg=self.BG, highlightthickness=0)
+        self.canvas.pack(side="left", padx=(0, 6))
+        self.label = tk.Label(self, bg=self.BG, font=("Segoe UI", 9))
+        self.label.pack(side="left")
+        for w in (self, self.canvas, self.label):
+            w.bind("<Button-1>", self._toggle)
+        variable.trace_add("write", lambda *_: self.redraw())
+        self.redraw()
+
+    def _toggle(self, _event=None):
+        self.variable.set(not self.variable.get())
+        if self.on_change:
+            self.on_change()
+
+    def redraw(self):
+        on = self.variable.get()
+        c = self.canvas
+        c.delete("all")
+        fill = "#2fbf71" if on else "#4a4a56"
+        c.create_oval(1, 1, 21, 21, fill=fill, outline=fill)
+        c.create_oval(19, 1, 39, 21, fill=fill, outline=fill)
+        c.create_rectangle(11, 1, 29, 21, fill=fill, outline=fill)
+        x = 21 if on else 3
+        c.create_oval(x, 3, x + 16, 19, fill="#ffffff", outline="#ffffff")
+        self.label.configure(text=self.text, fg="#f0f0f4" if on else "#8a8a96")
+
+
 class App:
-    def __init__(self, root: tk.Tk, layout: str, brightness: float):
+    def __init__(self, root: tk.Tk, layout: str, brightness: float, start_hidden: bool = False):
         self.root = root
         self.pixels = blank()
         self.color = (255, 190, 0)
@@ -97,6 +136,8 @@ class App:
         self._paused = None
         self._label = ""
         self._cleared = False
+        self._mute_watcher = None
+        self._before_mute = None
         self.worker = None
         self.device_status = ""
         try:
@@ -112,6 +153,18 @@ class App:
         self._draw_all()
         self._poll_worker()
         self._animate_thumbs()
+        if self.show_mute.get():
+            self._start_mute_watch()
+        else:
+            self.flip_button.state(["disabled"])
+        if start_hidden:  # launched at login: straight to the tray, play the playlist
+            self._tray_hint_shown = True
+            root.after(200, self._start_hidden)
+
+    def _start_hidden(self):
+        self._hide_to_tray()
+        if self._playlist:
+            self._play_playlist()
 
     # --- layout -------------------------------------------------------------
 
@@ -139,13 +192,13 @@ class App:
         tk.Label(bar, text="OpenEmote", bg="#1e1e26", fg="#f0f0f4",
                  font=("Segoe UI", 12, "bold")).pack(side="left", padx=12, pady=8)
         ttk.Button(bar, text="Hide now", command=self._hide_to_tray).pack(side="right", padx=(6, 12))
-        self.bg_label = tk.Label(bar, bg="#1e1e26", font=("Segoe UI", 9), cursor="hand2")
-        self.bg_label.pack(side="right")
-        self.bg_switch = tk.Canvas(bar, width=40, height=22, bg="#1e1e26", highlightthickness=0, cursor="hand2")
-        self.bg_switch.pack(side="right", padx=(0, 8))
-        for w in (self.bg_switch, self.bg_label):
-            w.bind("<Button-1>", lambda e: self._toggle_background())
-        self._draw_switch()
+        self.autostart = tk.BooleanVar(value=autostart.enabled())
+        self.show_mute = tk.BooleanVar(value=saved.get("mute", False))
+        self.flip_button = ttk.Button(bar, text="Flip", width=5, command=self._flip_mute)
+        self.flip_button.pack(side="right", padx=(0, 8))
+        Switch(bar, self.show_mute, "Show mute on display", self._toggle_mute_watch).pack(side="right", padx=(8, 4))
+        Switch(bar, self.tray_on_close, "Run in background when closed", self._save_playlist).pack(side="right", padx=8)
+        Switch(bar, self.autostart, "Start with Windows", self._toggle_autostart).pack(side="right", padx=8)
 
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
@@ -306,6 +359,7 @@ class App:
     def play(self, factory, label):
         self.stop()
         self._paused = None
+        self._label = label
         first = factory()
         if isinstance(first, list) and len(first) == 1:
             self.show(first[0][0])
@@ -377,7 +431,7 @@ class App:
         try:
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
             CONFIG.write_text(json.dumps({"items": self._playlist, "seconds": self._seconds(),
-                                          "tray": self.tray_on_close.get()}))
+                                          "tray": self.tray_on_close.get(), "mute": self.show_mute.get()}))
         except OSError:
             pass
 
@@ -413,23 +467,49 @@ class App:
 
     # --- tray -----------------------------------------------------------------
 
-    def _draw_switch(self):
-        on = self.tray_on_close.get()
-        c = self.bg_switch
-        c.delete("all")
-        fill = "#2fbf71" if on else "#4a4a56"
-        c.create_oval(1, 1, 21, 21, fill=fill, outline=fill)
-        c.create_oval(19, 1, 39, 21, fill=fill, outline=fill)
-        c.create_rectangle(11, 1, 29, 21, fill=fill, outline=fill)
-        x = 21 if on else 3
-        c.create_oval(x, 3, x + 16, 19, fill="#ffffff", outline="#ffffff")
-        self.bg_label.configure(text="Run in background when closed" + ("" if on else " (off)"),
-                                fg="#f0f0f4" if on else "#8a8a96")
+    # --- mute display -----------------------------------------------------------
 
-    def _toggle_background(self):
-        self.tray_on_close.set(not self.tray_on_close.get())
-        self._draw_switch()
+    def _toggle_mute_watch(self):
         self._save_playlist()
+        self.flip_button.state(["!disabled"] if self.show_mute.get() else ["disabled"])
+        if self.show_mute.get():
+            self._start_mute_watch()
+        else:
+            if self._mute_watcher:
+                self._mute_watcher.stop()
+                self._mute_watcher = None
+            self._on_mute(False)
+
+    def _start_mute_watch(self):
+        if self._mute_watcher or self.display is None:
+            return
+        self._mute_watcher = MuteWatcher(lambda muted: self.root.after(0, self._on_mute, muted))
+        self._mute_watcher.start()
+
+    def _flip_mute(self):
+        if self._mute_watcher:
+            self._mute_watcher.flip()
+
+    def _on_mute(self, muted: bool):
+        if muted:
+            if self._label != MUTED_LABEL:
+                self._before_mute = (self._factory, self._label) if self._job else list(self.pixels)
+            self.play(PRESETS["muted"].factory, MUTED_LABEL)
+        elif self._label == MUTED_LABEL and self._job:  # still showing mute: go back to what was on
+            before, self._before_mute = self._before_mute, None
+            if isinstance(before, tuple):
+                self.play(*before)
+            else:
+                self.stop()
+                self._label = ""
+                self.show(before or blank())
+
+    def _toggle_autostart(self):
+        try:
+            autostart.set_enabled(self.autostart.get())
+        except OSError as e:
+            messagebox.showerror("OpenEmote", f"Could not change autostart: {e}")
+        self.autostart.set(autostart.enabled())
 
     def _hide_to_tray(self):
         if self._start_tray():
@@ -454,6 +534,8 @@ class App:
             pystray.MenuItem(lambda item: "Resume" if self._paused else "Pause",
                              lambda: self.root.after(0, self.toggle_pause),
                              enabled=lambda item: bool(self._job or self._paused)),
+            pystray.MenuItem("Flip mute state", lambda: self.root.after(0, self._flip_mute),
+                             visible=lambda item: bool(self._mute_watcher)),
             pystray.MenuItem("Close", lambda: self.root.after(0, self._quit)),
         )
         self._tray = pystray.Icon("OpenEmote", icon.resize((64, 64), Image.Resampling.NEAREST), "OpenEmote", menu)
@@ -484,6 +566,8 @@ class App:
             self._tray.stop()
             self._tray = None
         self.stop()
+        if self._mute_watcher:
+            self._mute_watcher.stop()
         self._clear_display()
         self.root.destroy()
 
@@ -534,7 +618,7 @@ class App:
         self.root.after(1000, self._poll_worker)
 
 
-def run(layout: str = "mirror", brightness: float = 1.0):
+def run(layout: str = "mirror", brightness: float = 1.0, start_hidden: bool = False):
     try:  # crisp rendering on high-DPI Windows screens
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -550,6 +634,6 @@ def run(layout: str = "mirror", brightness: float = 1.0):
     except AttributeError:
         pass
     root = tk.Tk()
-    App(root, layout, brightness)
+    App(root, layout, brightness, start_hidden)
     root.resizable(False, False)
     root.mainloop()

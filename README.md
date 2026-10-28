@@ -12,6 +12,10 @@ display talks over USB and wrote this instead.
 - 112 presets (faces, icons, animations, stream text), almost all animated
 - Playlists: right-click presets to add them, and the display cycles through them
 - Runs in the system tray when you close the window, so the display keeps going
+- Start with Windows (straight to the tray, plays your playlist)
+- Show mute on display: pressing the mic's mute button switches to a muted icon. It only watches
+  the button, never the audio. The mic doesn't report its mute state, so if it gets out of sync
+  (e.g. you muted while the app was closed) use "Flip mute state" in the tray menu.
 - Scrolling text
 - Images and GIFs, scaled to 8×8
 - Command line, so you can trigger it from scripts or a Stream Deck

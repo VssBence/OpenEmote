@@ -17,7 +17,7 @@ ico.parent.mkdir(exist_ok=True)
 icon.resize((256, 256), Image.Resampling.NEAREST).save(ico, sizes=[(256, 256), (64, 64), (32, 32), (16, 16)])
 
 entry = ROOT / "build" / "launch.py"
-entry.write_text("from openemote.gui import run\nrun()\n")
+entry.write_text("from openemote.cli import main\nmain()\n")  # so the exe understands --tray
 
 subprocess.check_call([
     sys.executable, "-m", "PyInstaller", "--onefile", "--windowed", "--noconfirm",
