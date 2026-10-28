@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openemote"
+version = "0.1.0"
+description = "Drive the Razer Seiren Emote's 8x8 LED display without Razer software"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["hidapi>=0.14"]
+keywords = ["razer", "seiren", "emote", "led", "matrix", "hid", "streaming"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Topic :: System :: Hardware :: Hardware Drivers",
+]
+
+[project.optional-dependencies]
+images = ["pillow>=9.1"]
+
+[project.scripts]
+openemote = "openemote.cli:main"
+
+[project.gui-scripts]
+openemote-gui = "openemote.gui:run"
+
+[tool.setuptools]
+packages = ["openemote"]

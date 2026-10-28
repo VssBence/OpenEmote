@@ -1,0 +1,285 @@
+"""Tkinter app: pixel painter, preset gallery, text and image playback."""
+from __future__ import annotations
+
+import threading
+import tkinter as tk
+from tkinter import colorchooser, filedialog, messagebox, ttk
+
+from .device import DeviceError, EmoteDisplay
+from .font import text_steps
+from .frame import BLACK, HEIGHT, WIDTH, Frame, blank, to_hex
+from .presets import PRESETS
+
+CELL = 40
+THUMB = 4  # thumbnail pixel size
+BG = "#16161c"
+QUICK_COLORS = [(255, 255, 255), (255, 0, 0), (255, 100, 0), (255, 190, 0),
+                (0, 220, 0), (0, 200, 255), (0, 70, 255), (170, 0, 255), (255, 70, 150)]
+
+
+class DeviceWorker(threading.Thread):
+    """Sends frames off the UI thread, always skipping to the newest one."""
+
+    def __init__(self, display: EmoteDisplay):
+        super().__init__(daemon=True)
+        self.display = display
+        self.error: Exception | None = None
+        self._frame: Frame | None = None
+        self._cv = threading.Condition()
+
+    def submit(self, frame: Frame) -> None:
+        with self._cv:
+            self._frame = list(frame)
+            self._cv.notify()
+
+    def run(self):
+        while True:
+            with self._cv:
+                while self._frame is None:
+                    self._cv.wait()
+                frame, self._frame = self._frame, None
+            try:
+                self.display.show(frame)
+                self.error = None
+            except Exception as e:  # keep the UI alive if the mic is unplugged
+                self.error = e
+
+
+def thumbnail_image(frame: Frame) -> tk.PhotoImage:
+    img = tk.PhotoImage(width=WIDTH * THUMB, height=HEIGHT * THUMB)
+    rows = []
+    for y in range(HEIGHT):
+        row = "{" + " ".join(to_hex(frame[y * WIDTH + x]) for x in range(WIDTH) for _ in range(THUMB)) + "}"
+        rows.extend([row] * THUMB)
+    img.put(" ".join(rows))
+    return img
+
+
+class App:
+    def __init__(self, root: tk.Tk, layout: str, brightness: float):
+        self.root = root
+        self.pixels = blank()
+        self.color = (255, 190, 0)
+        self._job = None
+        self._factory = None
+        self._steps = None
+        self._thumbs = []
+        self.worker = None
+        self.device_status = ""
+        try:
+            self.display = EmoteDisplay(layout=layout, brightness=brightness)
+            self.device_status = f"Connected · firmware {self.display.firmware()} · layout {layout}"
+            self.worker = DeviceWorker(self.display)
+            self.worker.start()
+        except (DeviceError, OSError) as e:
+            self.display = None
+            self.device_status = f"Preview only · {e}"
+        self._build(int(brightness * 100))
+        self._draw_all()
+        self._poll_worker()
+
+    # --- layout -------------------------------------------------------------
+
+    def _build(self, brightness: int):
+        root = self.root
+        root.title("OpenEmote · Seiren Emote display")
+        root.configure(bg=BG)
+        style = ttk.Style(root)
+        style.theme_use("clam")
+        for name in ("TFrame", "TLabelframe"):
+            style.configure(name, background=BG)
+        style.configure("TLabelframe.Label", background=BG, foreground="#c8c8d0")
+        style.configure("TLabel", background=BG, foreground="#c8c8d0")
+        style.configure("TCheckbutton", background=BG, foreground="#c8c8d0")
+        style.configure("Status.TLabel", foreground="#8a8a96")
+
+        main = ttk.Frame(root, padding=12)
+        main.pack(fill="both", expand=True)
+
+        # left: painter
+        left = ttk.Frame(main)
+        left.grid(row=0, column=0, sticky="n", padx=(0, 12))
+        self.canvas = tk.Canvas(left, width=WIDTH * CELL, height=HEIGHT * CELL, bg="#000", highlightthickness=0)
+        self.canvas.pack()
+        self.cells = [self.canvas.create_rectangle(x * CELL + 2, y * CELL + 2, (x + 1) * CELL - 2, (y + 1) * CELL - 2,
+                                                   fill="#000", outline="#222")
+                      for y in range(HEIGHT) for x in range(WIDTH)]
+        self.canvas.bind("<Button-1>", lambda e: self._paint(e, self.color))
+        self.canvas.bind("<B1-Motion>", lambda e: self._paint(e, self.color))
+        self.canvas.bind("<Button-3>", lambda e: self._paint(e, BLACK))
+        self.canvas.bind("<B3-Motion>", lambda e: self._paint(e, BLACK))
+        ttk.Label(left, text="Left click: paint · right click: erase", style="Status.TLabel").pack(pady=(4, 6))
+
+        swatches = ttk.Frame(left)
+        swatches.pack(fill="x")
+        self.swatch = tk.Button(swatches, width=3, bg=to_hex(self.color), relief="flat", command=self._pick_color)
+        self.swatch.pack(side="left", padx=(0, 6))
+        for c in QUICK_COLORS:
+            tk.Button(swatches, width=2, bg=to_hex(c), activebackground=to_hex(c), relief="flat",
+                      command=lambda c=c: self._set_color(c)).pack(side="left", padx=1)
+
+        tools = ttk.Frame(left)
+        tools.pack(fill="x", pady=6)
+        ttk.Button(tools, text="Clear", command=lambda: self._show_static(blank())).pack(side="left")
+        ttk.Button(tools, text="Fill", command=lambda: self._show_static(blank(self.color))).pack(side="left", padx=4)
+        ttk.Button(tools, text="Send", command=self._send).pack(side="left")
+        self.live = tk.BooleanVar(value=True)
+        ttk.Checkbutton(tools, text="Live", variable=self.live).pack(side="left", padx=6)
+
+        box = ttk.Labelframe(left, text="Text", padding=6)
+        box.pack(fill="x", pady=(6, 0))
+        self.text = tk.StringVar(value="HELLO")
+        ttk.Entry(box, textvariable=self.text, width=14).pack(side="left")
+        self.rainbow = tk.BooleanVar(value=True)
+        ttk.Checkbutton(box, text="Rainbow", variable=self.rainbow).pack(side="left", padx=4)
+        ttk.Button(box, text="Go", width=4, command=self._play_text).pack(side="left")
+
+        box = ttk.Labelframe(left, text="Display", padding=6)
+        box.pack(fill="x", pady=(6, 0))
+        ttk.Button(box, text="Open image / GIF…", command=self._open_image).pack(side="left")
+        ttk.Button(box, text="Stop", command=self.stop).pack(side="left", padx=4)
+        ttk.Label(box, text="Brightness").pack(side="left", padx=(8, 2))
+        self.brightness = tk.Scale(box, from_=5, to=100, orient="horizontal", length=90, showvalue=False,
+                                   bg=BG, highlightthickness=0, troughcolor="#333", command=self._set_brightness)
+        self.brightness.set(brightness)
+        self.brightness.pack(side="left")
+
+        # right: preset gallery, one tab per category
+        style.configure("TNotebook", background=BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background="#24242c", foreground="#c8c8d0", padding=(12, 4))
+        style.map("TNotebook.Tab", background=[("selected", "#3a3a46")])
+        tabs = ttk.Notebook(main)
+        tabs.grid(row=0, column=1, sticky="n")
+        for category, title in (("faces", "Faces"), ("icons", "Icons"), ("animated", "Animations"), ("text", "Text")):
+            box = ttk.Frame(tabs, padding=6)
+            tabs.add(box, text=title)
+            items = [p for p in PRESETS.values() if p.category == category]
+            for n, preset in enumerate(items):
+                img = thumbnail_image(preset.thumbnail())
+                self._thumbs.append(img)
+                b = tk.Button(box, image=img, text=preset.name, compound="top", width=62, bg="#24242c",
+                              fg="#c8c8d0", activebackground="#34343e", relief="flat", font=("Segoe UI", 8),
+                              command=lambda p=preset: self.play_preset(p))
+                b.grid(row=n // 8, column=n % 8, padx=2, pady=2)
+
+        self.status = ttk.Label(root, text="", style="Status.TLabel", padding=(12, 0, 12, 8))
+        self.status.pack(fill="x")
+        self._set_status("Ready")
+
+    # --- drawing --------------------------------------------------------------
+
+    def _draw_all(self):
+        for i, c in enumerate(self.pixels):
+            self.canvas.itemconfigure(self.cells[i], fill=to_hex(c))
+
+    def show(self, frame: Frame):
+        self.pixels = list(frame)
+        self._draw_all()
+        self._send()
+
+    def _send(self):
+        if self.worker:
+            self.worker.submit(self.pixels)
+
+    def _paint(self, event, color):
+        x, y = event.x // CELL, event.y // CELL
+        if not (0 <= x < WIDTH and 0 <= y < HEIGHT):
+            return
+        self.stop()
+        i = y * WIDTH + x
+        if self.pixels[i] == color:
+            return
+        self.pixels[i] = color
+        self.canvas.itemconfigure(self.cells[i], fill=to_hex(color))
+        if self.live.get():
+            self._send()
+
+    def _set_color(self, c):
+        self.color = c
+        self.swatch.configure(bg=to_hex(c), activebackground=to_hex(c))
+
+    def _pick_color(self):
+        rgb, _ = colorchooser.askcolor(color=to_hex(self.color), title="Pick a color")
+        if rgb:
+            self._set_color(tuple(int(v) for v in rgb))
+
+    def _set_brightness(self, value):
+        level = int(value) / 100
+        if self.display and level != self.display.brightness:
+            self.display.brightness = level
+            self._send()
+
+    # --- playback -------------------------------------------------------------
+
+    def _show_static(self, frame):
+        self.stop()
+        self.show(frame)
+
+    def play(self, factory, label):
+        self.stop()
+        first = factory()
+        if isinstance(first, list) and len(first) == 1:
+            self.show(first[0][0])
+            self._set_status(label)
+            return
+        self._factory, self._steps = factory, iter(first)
+        self._set_status(f"Playing {label}")
+        self._tick()
+
+    def _tick(self):
+        try:
+            frame, ms = next(self._steps)
+        except StopIteration:
+            self._steps = iter(self._factory())
+            frame, ms = next(self._steps)
+        self.show(frame)
+        self._job = self.root.after(max(int(ms), 20), self._tick)
+
+    def stop(self):
+        if self._job:
+            self.root.after_cancel(self._job)
+            self._job = None
+            self._set_status("Stopped")
+
+    def play_preset(self, preset):
+        self.play(preset.factory, preset.name)
+
+    def _play_text(self):
+        text = self.text.get().strip()
+        if text:
+            steps = text_steps(text, None if self.rainbow.get() else self.color)
+            self.play(lambda: steps, f"text '{text}'")
+
+    def _open_image(self):
+        path = filedialog.askopenfilename(filetypes=[("Images", "*.png *.gif *.jpg *.jpeg *.bmp *.webp"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            from .media import load_image
+            steps = load_image(path)
+        except Exception as e:
+            messagebox.showerror("OpenEmote", str(e))
+            return
+        self.play(lambda: steps, path.replace("\\", "/").rsplit("/", 1)[-1])
+
+    # --- status ---------------------------------------------------------------
+
+    def _set_status(self, text):
+        self.status.configure(text=f"{text}   ·   {self.device_status}")
+
+    def _poll_worker(self):
+        if self.worker and self.worker.error:
+            self.status.configure(text=f"Device error: {self.worker.error}")
+        self.root.after(1000, self._poll_worker)
+
+
+def run(layout: str = "mirror", brightness: float = 1.0):
+    try:  # crisp rendering on high-DPI Windows screens
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        pass
+    root = tk.Tk()
+    App(root, layout, brightness)
+    root.resizable(False, False)
+    root.mainloop()
