@@ -2,12 +2,31 @@
 import pathlib
 import subprocess
 import sys
+import time
 
 from PIL import Image
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+def _unlocked(path: pathlib.Path) -> bool:
+    try:
+        with open(path, "r+b"):
+            return True
+    except OSError:
+        return False
 sys.path.insert(0, str(ROOT))
+from openemote.instance import signal_quit  # noqa: E402
 from openemote.presets import PRESETS  # noqa: E402
+
+# a running copy locks the exe: ask it to close cleanly (clears display + tray icon)
+if signal_quit():
+    for _ in range(50):
+        time.sleep(0.1)
+        if not (ROOT / "OpenEmote.exe").exists() or _unlocked(ROOT / "OpenEmote.exe"):
+            break
+    else:
+        sys.exit("OpenEmote is still running, close it and try again.")
 
 # app icon from the smiley preset
 icon = Image.new("RGBA", (8, 8))

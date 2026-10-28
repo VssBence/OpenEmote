@@ -120,6 +120,7 @@ def main(argv=None):
     p.add_argument("--layout", choices=list(LAYOUTS), default="mirror", help="pixel layout (see 'calibrate')")
     p.add_argument("--brightness", type=int, default=100, metavar="0-100")
     p.add_argument("--tray", action="store_true", help="start the app hidden in the tray and play the playlist")
+    p.add_argument("--quit", action="store_true", help="close a running app cleanly (clears the display)")
     sub = p.add_subparsers(dest="cmd", metavar="command")
 
     sub.add_parser("gui", help="open the graphical app (default)")
@@ -147,6 +148,10 @@ def main(argv=None):
 
     args = p.parse_args(argv)
     brightness = max(0, min(100, args.brightness)) / 100
+
+    if args.quit:
+        from .instance import signal_quit
+        sys.exit(0 if signal_quit() else "OpenEmote is not running.")
 
     if args.cmd in (None, "gui"):
         from .gui import run

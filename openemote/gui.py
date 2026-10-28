@@ -10,7 +10,7 @@ import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
-from . import autostart
+from . import autostart, instance
 from .device import DeviceError, EmoteDisplay
 from .font import text_steps
 from .frame import BLACK, HEIGHT, WIDTH, Frame, blank, to_hex
@@ -18,6 +18,7 @@ from .mute import MuteWatcher
 from .presets import PRESETS, playlist
 
 MUTED_LABEL = "MUTED"
+MUTED_PEEK_MS = 3000
 
 CONFIG_DIR = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "OpenEmote"
 CONFIG = CONFIG_DIR / "settings.json"
@@ -138,6 +139,7 @@ class App:
         self._cleared = False
         self._mute_watcher = None
         self._before_mute = None
+        self._mute_return = None
         self.worker = None
         self.device_status = ""
         try:
@@ -196,7 +198,7 @@ class App:
         self.show_mute = tk.BooleanVar(value=saved.get("mute", False))
         self.flip_button = ttk.Button(bar, text="Flip", width=5, command=self._flip_mute)
         self.flip_button.pack(side="right", padx=(0, 8))
-        Switch(bar, self.show_mute, "Show mute on display", self._toggle_mute_watch).pack(side="right", padx=(8, 4))
+        Switch(bar, self.show_mute, "Show mute status", self._toggle_mute_watch).pack(side="right", padx=(8, 4))
         Switch(bar, self.tray_on_close, "Run in background when closed", self._save_playlist).pack(side="right", padx=8)
         Switch(bar, self.autostart, "Start with Windows", self._toggle_autostart).pack(side="right", padx=8)
 
@@ -360,6 +362,11 @@ class App:
         self.stop()
         self._paused = None
         self._label = label
+        if self._mute_return:
+            self.root.after_cancel(self._mute_return)
+            self._mute_return = None
+        if self._is_muted() and label != MUTED_LABEL:  # muted: just a quick peek, then back to mute
+            self._mute_return = self.root.after(MUTED_PEEK_MS, self._back_to_mute, label)
         first = factory()
         if isinstance(first, list) and len(first) == 1:
             self.show(first[0][0])
@@ -486,6 +493,14 @@ class App:
         self._mute_watcher = MuteWatcher(lambda muted: self.root.after(0, self._on_mute, muted))
         self._mute_watcher.start()
 
+    def _is_muted(self) -> bool:
+        return bool(self._mute_watcher and self._mute_watcher.muted)
+
+    def _back_to_mute(self, label):
+        self._mute_return = None
+        if self._is_muted() and self._label == label:
+            self.play(PRESETS["muted"].factory, MUTED_LABEL)
+
     def _flip_mute(self):
         if self._mute_watcher:
             self._mute_watcher.flip()
@@ -495,7 +510,7 @@ class App:
             if self._label != MUTED_LABEL:
                 self._before_mute = (self._factory, self._label) if self._job else list(self.pixels)
             self.play(PRESETS["muted"].factory, MUTED_LABEL)
-        elif self._label == MUTED_LABEL and self._job:  # still showing mute: go back to what was on
+        elif (self._label == MUTED_LABEL and self._job) or self._mute_return:  # mute or a peek: go back
             before, self._before_mute = self._before_mute, None
             if isinstance(before, tuple):
                 self.play(*before)
@@ -624,16 +639,20 @@ def run(layout: str = "mirror", brightness: float = 1.0, start_hidden: bool = Fa
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         pass
-    try:  # only one copy at a time, otherwise two apps fight over the display
-        import ctypes
-        ctypes.windll.kernel32.CreateMutexW(None, False, "OpenEmote.SingleInstance")
-        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-            tk.Tk().withdraw()
-            messagebox.showinfo("OpenEmote", "OpenEmote is already running. Look for it in the system tray.")
-            return
-    except AttributeError:
-        pass
+    if instance.already_running():  # only one copy, otherwise two apps fight over the display
+        tk.Tk().withdraw()
+        messagebox.showinfo("OpenEmote", "OpenEmote is already running. Look for it in the system tray.")
+        return
     root = tk.Tk()
-    App(root, layout, brightness, start_hidden)
+    app = App(root, layout, brightness, start_hidden)
+    quit_event = instance.quit_event()
+
+    def watch_quit():  # `openemote --quit` from elsewhere: close cleanly
+        if instance.quit_requested(quit_event):
+            app._quit()
+        else:
+            root.after(300, watch_quit)
+
+    watch_quit()
     root.resizable(False, False)
     root.mainloop()
