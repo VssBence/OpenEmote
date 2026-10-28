@@ -16,7 +16,7 @@ PALETTE = {
     ".": BLACK,
     "K": BLACK,
     "W": (255, 255, 255),
-    "w": (90, 90, 90),
+    "w": (140, 140, 140),
     "R": (255, 0, 0),
     "r": (110, 0, 0),
     "P": (255, 70, 150),
@@ -25,9 +25,9 @@ PALETTE = {
     "G": (0, 220, 0),
     "g": (0, 80, 0),
     "C": (0, 200, 255),
-    "B": (0, 70, 255),
+    "B": (0, 100, 255),
     "M": (170, 0, 255),
-    "N": (130, 55, 0),
+    "N": (170, 70, 10),
 }
 
 NAMED_COLORS = {
@@ -47,6 +47,29 @@ def sprite(rows, palette=PALETTE) -> Frame:
     if len(rows) != HEIGHT or any(len(r) != WIDTH for r in rows):
         raise ValueError("sprites must be 8 rows of 8 characters")
     return [palette.get(c, BLACK) for row in rows for c in row]
+
+
+def shift(frame: Frame, dx: int = 0, dy: int = 0, wrap: bool = False) -> Frame:
+    out = blank()
+    for y in range(HEIGHT):
+        for x in range(WIDTH):
+            sx, sy = x - dx, y - dy
+            if wrap:
+                sx, sy = sx % WIDTH, sy % HEIGHT
+            if 0 <= sx < WIDTH and 0 <= sy < HEIGHT:
+                out[y * WIDTH + x] = frame[sy * WIDTH + sx]
+    return out
+
+
+def overlay(frame: Frame, points, color: Color) -> Frame:
+    out = list(frame)
+    for x, y in points:
+        out[y * WIDTH + x] = color
+    return out
+
+
+def mix(a: Color, b: Color, k: float) -> Color:
+    return tuple(int(x + (y - x) * k) for x, y in zip(a, b))
 
 
 def rotate(frame: Frame) -> Frame:

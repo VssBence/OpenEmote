@@ -1,15 +1,20 @@
 """Tkinter app: pixel painter, preset gallery, text and image playback."""
 from __future__ import annotations
 
+import json
+import os
+import pathlib
 import threading
+import time
 import tkinter as tk
 from tkinter import colorchooser, filedialog, messagebox, ttk
 
 from .device import DeviceError, EmoteDisplay
 from .font import text_steps
 from .frame import BLACK, HEIGHT, WIDTH, Frame, blank, to_hex
-from .presets import PRESETS
+from .presets import PRESETS, playlist
 
+CONFIG = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "OpenEmote" / "playlist.json"
 CELL = 40
 THUMB = 4  # thumbnail pixel size
 BG = "#16161c"
@@ -45,13 +50,22 @@ class DeviceWorker(threading.Thread):
                 self.error = e
 
 
+_scratch = None
+
+
+def draw_thumbnail(img: tk.PhotoImage, frame: Frame) -> None:
+    # draw at 8x8, then let Tk scale it up (much cheaper than putting every big pixel)
+    global _scratch
+    if _scratch is None:
+        _scratch = tk.PhotoImage(width=WIDTH, height=HEIGHT)
+    _scratch.put(" ".join("{" + " ".join(to_hex(c) for c in frame[y * WIDTH:(y + 1) * WIDTH]) + "}"
+                          for y in range(HEIGHT)))
+    img.tk.call(img, "copy", _scratch, "-zoom", THUMB, THUMB)
+
+
 def thumbnail_image(frame: Frame) -> tk.PhotoImage:
     img = tk.PhotoImage(width=WIDTH * THUMB, height=HEIGHT * THUMB)
-    rows = []
-    for y in range(HEIGHT):
-        row = "{" + " ".join(to_hex(frame[y * WIDTH + x]) for x in range(WIDTH) for _ in range(THUMB)) + "}"
-        rows.extend([row] * THUMB)
-    img.put(" ".join(rows))
+    draw_thumbnail(img, frame)
     return img
 
 
@@ -64,6 +78,7 @@ class App:
         self._factory = None
         self._steps = None
         self._thumbs = []
+        self._thumb_anims = []
         self.worker = None
         self.device_status = ""
         try:
@@ -77,6 +92,7 @@ class App:
         self._build(int(brightness * 100))
         self._draw_all()
         self._poll_worker()
+        self._animate_thumbs()
 
     # --- layout -------------------------------------------------------------
 
@@ -84,6 +100,8 @@ class App:
         root = self.root
         root.title("OpenEmote · Seiren Emote display")
         root.configure(bg=BG)
+        self._icon = thumbnail_image(PRESETS["smiley"].thumbnail())
+        root.iconphoto(True, self._icon)
         style = ttk.Style(root)
         style.theme_use("clam")
         for name in ("TFrame", "TLabelframe"):
@@ -144,23 +162,57 @@ class App:
         self.brightness.set(brightness)
         self.brightness.pack(side="left")
 
-        # right: preset gallery, one tab per category
-        style.configure("TNotebook", background=BG, borderwidth=0)
-        style.configure("TNotebook.Tab", background="#24242c", foreground="#c8c8d0", padding=(12, 4))
-        style.map("TNotebook.Tab", background=[("selected", "#3a3a46")])
-        tabs = ttk.Notebook(main)
-        tabs.grid(row=0, column=1, sticky="n")
+        box = ttk.Labelframe(left, text="Playlist · right-click presets to add", padding=6)
+        box.pack(fill="x", pady=(6, 0))
+        self.playlist_box = tk.Listbox(box, height=5, bg="#24242c", fg="#c8c8d0", selectbackground="#3a3a46",
+                                       highlightthickness=0, relief="flat", activestyle="none")
+        self.playlist_box.pack(side="left", fill="both", expand=True)
+        ctrl = ttk.Frame(box)
+        ctrl.pack(side="left", padx=(6, 0))
+        ttk.Button(ctrl, text="Play", width=8, command=self._play_playlist).pack()
+        ttk.Button(ctrl, text="Remove", width=8, command=self._playlist_remove).pack(pady=2)
+        ttk.Button(ctrl, text="Clear", width=8, command=lambda: self._playlist_set([])).pack()
+        secs = ttk.Frame(ctrl)
+        secs.pack(pady=(4, 0))
+        saved = self._load_playlist()
+        self.cycle_secs = tk.IntVar(value=saved.get("seconds", 5))
+        tk.Spinbox(secs, from_=1, to=300, width=4, textvariable=self.cycle_secs,
+                   command=self._save_playlist).pack(side="left")
+        ttk.Label(secs, text="sec").pack(side="left", padx=2)
+        self._playlist_set([n for n in saved.get("items", []) if n in PRESETS], save=False)
+
+        # right: one long scrollable list of every preset
+        right = ttk.Frame(main)
+        right.grid(row=0, column=1, sticky="ns")
+        main.rowconfigure(0, weight=1)
+        self.gallery = tk.Canvas(right, bg=BG, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(right, orient="vertical", command=self.gallery.yview)
+        self.gallery.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.gallery.pack(side="left", fill="both", expand=True)
+        inner = ttk.Frame(self.gallery)
+        self.gallery.create_window((0, 0), window=inner, anchor="nw")
+        row = 0
         for category, title in (("faces", "Faces"), ("icons", "Icons"), ("animated", "Animations"), ("text", "Text")):
-            box = ttk.Frame(tabs, padding=6)
-            tabs.add(box, text=title)
+            ttk.Label(inner, text=title, font=("Segoe UI", 10, "bold")).grid(
+                row=row, column=0, columnspan=8, sticky="w", pady=(8 if row else 0, 2))
+            row += 1
             items = [p for p in PRESETS.values() if p.category == category]
             for n, preset in enumerate(items):
                 img = thumbnail_image(preset.thumbnail())
                 self._thumbs.append(img)
-                b = tk.Button(box, image=img, text=preset.name, compound="top", width=62, bg="#24242c",
+                b = tk.Button(inner, image=img, text=preset.name, compound="top", width=62, bg="#24242c",
                               fg="#c8c8d0", activebackground="#34343e", relief="flat", font=("Segoe UI", 8),
                               command=lambda p=preset: self.play_preset(p))
-                b.grid(row=n // 8, column=n % 8, padx=2, pady=2)
+                b.grid(row=row + n // 8, column=n % 8, padx=2, pady=2)
+                b.bind("<Button-3>", lambda e, p=preset: self._playlist_add(p))
+                if preset.animated:
+                    self._thumb_anims.append({"img": img, "button": b, "preset": preset, "steps": None, "due": 0.0})
+            row += -(-len(items) // 8)
+        inner.update_idletasks()
+        self.gallery.configure(width=inner.winfo_reqwidth(), height=left.winfo_reqheight(),
+                               scrollregion=(0, 0, inner.winfo_reqwidth(), inner.winfo_reqheight()))
+        root.bind_all("<MouseWheel>", lambda e: self.gallery.yview_scroll(int(-e.delta / 120), "units"))
 
         self.status = ttk.Label(root, text="", style="Status.TLabel", padding=(12, 0, 12, 8))
         self.status.pack(fill="x")
@@ -261,6 +313,71 @@ class App:
             messagebox.showerror("OpenEmote", str(e))
             return
         self.play(lambda: steps, path.replace("\\", "/").rsplit("/", 1)[-1])
+
+    # --- playlist -------------------------------------------------------------
+
+    def _load_playlist(self) -> dict:
+        try:
+            return json.loads(CONFIG.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def _save_playlist(self):
+        try:
+            CONFIG.parent.mkdir(parents=True, exist_ok=True)
+            CONFIG.write_text(json.dumps({"items": self._playlist, "seconds": self._seconds()}))
+        except OSError:
+            pass
+
+    def _seconds(self) -> int:
+        try:
+            return max(1, int(self.cycle_secs.get()))
+        except (tk.TclError, ValueError):
+            return 5
+
+    def _playlist_set(self, names, save=True):
+        self._playlist = list(names)
+        self.playlist_box.delete(0, "end")
+        for n in self._playlist:
+            self.playlist_box.insert("end", n)
+        if save:
+            self._save_playlist()
+
+    def _playlist_add(self, preset):
+        self._playlist_set(self._playlist + [preset.name])
+        self._set_status(f"Added {preset.name} to playlist")
+
+    def _playlist_remove(self):
+        picked = set(self.playlist_box.curselection())
+        self._playlist_set([n for i, n in enumerate(self._playlist) if i not in picked])
+
+    def _play_playlist(self):
+        if not self._playlist:
+            self._set_status("Playlist is empty · right-click presets to add them")
+            return
+        self._save_playlist()
+        presets, secs = [PRESETS[n] for n in self._playlist], self._seconds()
+        self.play(lambda: playlist(presets, secs), f"playlist ({len(presets)} items, {secs}s each)")
+
+    def _animate_thumbs(self):
+        """Play every visible gallery thumbnail as a little preview."""
+        now = time.monotonic()
+        top = self.gallery.canvasy(0)
+        bottom = top + self.gallery.winfo_height()
+        for t in self._thumb_anims:
+            button = t["button"]
+            if now < t["due"] or button.winfo_y() + button.winfo_height() < top or button.winfo_y() > bottom:
+                continue
+            if t["steps"] is None:
+                t["steps"] = iter(t["preset"].factory())
+            try:
+                frame, ms = next(t["steps"])
+            except StopIteration:
+                t["steps"] = iter(t["preset"].factory())
+                frame, ms = next(t["steps"])
+            draw_thumbnail(t["img"], frame)
+            t["due"] = now + max(ms, 100) / 1000
+        self.root.after(50, self._animate_thumbs)
 
     # --- status ---------------------------------------------------------------
 

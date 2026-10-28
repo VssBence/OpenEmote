@@ -9,7 +9,7 @@ import time
 from .device import LAYOUTS, DeviceError, EmoteDisplay
 from .font import text_steps
 from .frame import blank, parse_color, sprite
-from .presets import CATEGORIES, PRESETS
+from .presets import CATEGORIES, PRESETS, playlist
 
 
 def play(display: EmoteDisplay, factory, duration: float | None = None, loop: bool = True) -> None:
@@ -44,9 +44,21 @@ def cmd_show(args, display):
         close = difflib.get_close_matches(args.preset.lower(), PRESETS, n=3)
         hint = f" Did you mean: {', '.join(close)}?" if close else ""
         sys.exit(f"Unknown preset {args.preset!r}.{hint} Run 'openemote list' to see all presets.")
+    if args.still:
+        display.show(preset.thumbnail())
+        return
     if preset.animated:
         print(f"Playing {preset.name} (Ctrl+C to stop)")
     play(display, preset.factory, args.duration)
+
+
+def cmd_cycle(args, display):
+    unknown = [n for n in args.presets if n.lower() not in PRESETS]
+    if unknown:
+        sys.exit(f"Unknown preset(s): {', '.join(unknown)}. Run 'openemote list' to see all presets.")
+    presets = [PRESETS[n.lower()] for n in args.presets]
+    print(f"Cycling {len(presets)} presets, {args.seconds:g}s each (Ctrl+C to stop)")
+    play(display, lambda: playlist(presets, args.seconds))
 
 
 def cmd_text(args, display):
@@ -114,6 +126,10 @@ def main(argv=None):
     s = sub.add_parser("show", help="show a preset")
     s.add_argument("preset")
     s.add_argument("--duration", type=float, help="stop animations after N seconds")
+    s.add_argument("--still", action="store_true", help="show one frame and exit")
+    cy = sub.add_parser("cycle", help="cycle through several presets")
+    cy.add_argument("presets", nargs="+")
+    cy.add_argument("--seconds", type=float, default=5, help="time per preset")
     t = sub.add_parser("text", help="show or scroll text")
     t.add_argument("text")
     t.add_argument("--color", default="rainbow", help="name, hex (ff8800) or 'rainbow'")

@@ -9,7 +9,8 @@ display talks over USB and wrote this instead.
 ## What it does
 
 - Draw on the display live
-- 95 presets (faces, icons, animations, stream text)
+- 112 presets (faces, icons, animations, stream text), almost all animated
+- Playlists: right-click presets to add them, and the display cycles through them
 - Scrolling text
 - Images and GIFs, scaled to 8×8
 - Command line, so you can trigger it from scripts or a Stream Deck
@@ -36,7 +37,9 @@ Or grab `OpenEmote.exe` from Releases. To build it yourself: `pip install pyinst
 ```sh
 openemote list
 openemote show smiley
+openemote show smiley --still        # one frame, stays after exit
 openemote show fire --duration 10
+openemote cycle smiley love beer fire --seconds 5
 openemote text "LIVE NOW" --color red
 openemote image cat.gif
 openemote color ff00ff
@@ -55,20 +58,22 @@ with EmoteDisplay() as display:
 
 ## Adding presets
 
-Presets are in [`openemote/presets.py`](openemote/presets.py). A static one is just ASCII art:
+Presets are in [`openemote/presets.py`](openemote/presets.py). Draw it in ASCII and pick an animation:
 
 ```python
-static("pumpkin", "Spooky pumpkin", [
-    "...gg...",
-    "..OOOO..",
-    ".OOOOOO.",
-    "OOKOOKOO",
-    "OOOOOOOO",
-    "OKOKKOKO",
-    ".OOOOOO.",
-    "..OOOO..",
-])
+add("ghost", "Floating ghost", "faces", bob(sprite([
+    "..WWWW..",
+    ".WWWWWW.",
+    "WWKWWKWW",
+    "WWKWWKWW",
+    "WWWWWWWW",
+    "WWWKKWWW",
+    "WWWWWWWW",
+    "WW.WW.WW",
+])))
 ```
+
+There are helpers for `blink`, `bob`, `shake`, `shine`, `pulse`, `flash`, `slide` and `draw_in`.
 
 PRs welcome.
 
