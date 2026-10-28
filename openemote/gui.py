@@ -4,7 +4,6 @@ from __future__ import annotations
 import atexit
 import json
 import os
-import sys
 import pathlib
 import threading
 import time
@@ -83,31 +82,6 @@ def thumbnail_image(frame: Frame) -> tk.PhotoImage:
     return img
 
 
-def _promote_tray_icon():
-    """Windows 11 hides new tray icons in the overflow menu. Show ours on the taskbar,
-    unless the user has already chosen a setting for it."""
-    if not getattr(sys, "frozen", False):
-        return  # running from Python: the entry would be python.exe, leave it alone
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\NotifyIconSettings") as settings:
-            for i in range(winreg.QueryInfoKey(settings)[0]):
-                name = winreg.EnumKey(settings, i)
-                with winreg.OpenKey(settings, name, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
-                    try:
-                        path = winreg.QueryValueEx(key, "ExecutablePath")[0]
-                    except OSError:
-                        continue
-                    if not path.lower().endswith("\\" + os.path.basename(sys.executable).lower()):
-                        continue
-                    try:
-                        winreg.QueryValueEx(key, "IsPromoted")
-                    except OSError:
-                        winreg.SetValueEx(key, "IsPromoted", 0, winreg.REG_DWORD, 1)
-    except OSError:
-        pass
-
-
 class App:
     def __init__(self, root: tk.Tk, layout: str, brightness: float):
         self.root = root
@@ -155,6 +129,23 @@ class App:
         style.configure("TLabel", background=BG, foreground="#c8c8d0")
         style.configure("TCheckbutton", background=BG, foreground="#c8c8d0")
         style.configure("Status.TLabel", foreground="#8a8a96")
+
+        saved = self._load_settings()
+        self.tray_on_close = tk.BooleanVar(value=saved.get("tray", True))
+
+        # top bar: app name + background toggle
+        bar = tk.Frame(root, bg="#1e1e26")
+        bar.pack(fill="x")
+        tk.Label(bar, text="OpenEmote", bg="#1e1e26", fg="#f0f0f4",
+                 font=("Segoe UI", 12, "bold")).pack(side="left", padx=12, pady=8)
+        ttk.Button(bar, text="Hide now", command=self._hide_to_tray).pack(side="right", padx=(6, 12))
+        self.bg_label = tk.Label(bar, bg="#1e1e26", font=("Segoe UI", 9), cursor="hand2")
+        self.bg_label.pack(side="right")
+        self.bg_switch = tk.Canvas(bar, width=40, height=22, bg="#1e1e26", highlightthickness=0, cursor="hand2")
+        self.bg_switch.pack(side="right", padx=(0, 8))
+        for w in (self.bg_switch, self.bg_label):
+            w.bind("<Button-1>", lambda e: self._toggle_background())
+        self._draw_switch()
 
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
@@ -219,16 +210,11 @@ class App:
         ttk.Button(ctrl, text="Clear", width=8, command=lambda: self._playlist_set([])).pack()
         secs = ttk.Frame(ctrl)
         secs.pack(pady=(4, 0))
-        saved = self._load_settings()
         self.cycle_secs = tk.IntVar(value=saved.get("seconds", 5))
         tk.Spinbox(secs, from_=1, to=300, width=4, textvariable=self.cycle_secs,
                    command=self._save_playlist).pack(side="left")
         ttk.Label(secs, text="sec").pack(side="left", padx=2)
-        self.tray_on_close = tk.BooleanVar(value=saved.get("tray", True))
         self._playlist_set([n for n in saved.get("items", []) if n in PRESETS], save=False)
-
-        ttk.Checkbutton(left, text="Keep running in the tray when closed", variable=self.tray_on_close,
-                        command=self._save_playlist).pack(anchor="w", pady=(6, 0))
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # right: one long scrollable list of every preset
@@ -427,10 +413,32 @@ class App:
 
     # --- tray -----------------------------------------------------------------
 
-    def _on_close(self):
-        if self.tray_on_close.get() and self._start_tray():
+    def _draw_switch(self):
+        on = self.tray_on_close.get()
+        c = self.bg_switch
+        c.delete("all")
+        fill = "#2fbf71" if on else "#4a4a56"
+        c.create_oval(1, 1, 21, 21, fill=fill, outline=fill)
+        c.create_oval(19, 1, 39, 21, fill=fill, outline=fill)
+        c.create_rectangle(11, 1, 29, 21, fill=fill, outline=fill)
+        x = 21 if on else 3
+        c.create_oval(x, 3, x + 16, 19, fill="#ffffff", outline="#ffffff")
+        self.bg_label.configure(text="Run in background when closed" + ("" if on else " (off)"),
+                                fg="#f0f0f4" if on else "#8a8a96")
+
+    def _toggle_background(self):
+        self.tray_on_close.set(not self.tray_on_close.get())
+        self._draw_switch()
+        self._save_playlist()
+
+    def _hide_to_tray(self):
+        if self._start_tray():
             self.root.withdraw()
-        else:
+
+    def _on_close(self):
+        if self.tray_on_close.get():
+            self._hide_to_tray()
+        if self.root.state() != "withdrawn":
             self._quit()
 
     def _start_tray(self) -> bool:
@@ -455,7 +463,6 @@ class App:
             if not self._tray_hint_shown:
                 self._tray_hint_shown = True
                 tray.notify("Still running here. Right-click the smiley for options.", "OpenEmote")
-            threading.Timer(2.0, _promote_tray_icon).start()
 
         self._tray.run_detached(setup)
         return True
