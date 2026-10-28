@@ -21,7 +21,7 @@ entry.write_text("from openemote.gui import run\nrun()\n")
 
 subprocess.check_call([
     sys.executable, "-m", "PyInstaller", "--onefile", "--windowed", "--noconfirm",
-    "--name", "OpenEmote", "--icon", str(ico), "--paths", str(ROOT),
+    "--name", "OpenEmote", "--icon", str(ico), "--hidden-import", "pystray._win32", "--paths", str(ROOT),
     "--distpath", str(ROOT), "--workpath", str(ROOT / "build" / "pyi"), "--specpath", str(ROOT / "build"),
     str(entry),
 ])

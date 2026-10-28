@@ -11,6 +11,7 @@ display talks over USB and wrote this instead.
 - Draw on the display live
 - 112 presets (faces, icons, animations, stream text), almost all animated
 - Playlists: right-click presets to add them, and the display cycles through them
+- Runs in the system tray when you close the window, so the display keeps going
 - Scrolling text
 - Images and GIFs, scaled to 8×8
 - Command line, so you can trigger it from scripts or a Stream Deck

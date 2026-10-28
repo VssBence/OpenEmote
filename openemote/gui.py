@@ -1,8 +1,10 @@
 """Tkinter app: pixel painter, preset gallery, text and image playback."""
 from __future__ import annotations
 
+import atexit
 import json
 import os
+import sys
 import pathlib
 import threading
 import time
@@ -14,7 +16,9 @@ from .font import text_steps
 from .frame import BLACK, HEIGHT, WIDTH, Frame, blank, to_hex
 from .presets import PRESETS, playlist
 
-CONFIG = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "OpenEmote" / "playlist.json"
+CONFIG_DIR = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home())) / "OpenEmote"
+CONFIG = CONFIG_DIR / "settings.json"
+OLD_CONFIG = CONFIG_DIR / "playlist.json"
 CELL = 40
 THUMB = 4  # thumbnail pixel size
 BG = "#16161c"
@@ -30,6 +34,7 @@ class DeviceWorker(threading.Thread):
         self.display = display
         self.error: Exception | None = None
         self._frame: Frame | None = None
+        self._running = True
         self._cv = threading.Condition()
 
     def submit(self, frame: Frame) -> None:
@@ -37,11 +42,20 @@ class DeviceWorker(threading.Thread):
             self._frame = list(frame)
             self._cv.notify()
 
+    def shutdown(self, timeout: float = 1.0) -> None:
+        """Stop sending and wait for the frame in flight to finish."""
+        with self._cv:
+            self._running = False
+            self._cv.notify()
+        self.join(timeout)
+
     def run(self):
         while True:
             with self._cv:
-                while self._frame is None:
+                while self._frame is None and self._running:
                     self._cv.wait()
+                if not self._running:
+                    return
                 frame, self._frame = self._frame, None
             try:
                 self.display.show(frame)
@@ -69,6 +83,31 @@ def thumbnail_image(frame: Frame) -> tk.PhotoImage:
     return img
 
 
+def _promote_tray_icon():
+    """Windows 11 hides new tray icons in the overflow menu. Show ours on the taskbar,
+    unless the user has already chosen a setting for it."""
+    if not getattr(sys, "frozen", False):
+        return  # running from Python: the entry would be python.exe, leave it alone
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Control Panel\NotifyIconSettings") as settings:
+            for i in range(winreg.QueryInfoKey(settings)[0]):
+                name = winreg.EnumKey(settings, i)
+                with winreg.OpenKey(settings, name, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+                    try:
+                        path = winreg.QueryValueEx(key, "ExecutablePath")[0]
+                    except OSError:
+                        continue
+                    if not path.lower().endswith("\\" + os.path.basename(sys.executable).lower()):
+                        continue
+                    try:
+                        winreg.QueryValueEx(key, "IsPromoted")
+                    except OSError:
+                        winreg.SetValueEx(key, "IsPromoted", 0, winreg.REG_DWORD, 1)
+    except OSError:
+        pass
+
+
 class App:
     def __init__(self, root: tk.Tk, layout: str, brightness: float):
         self.root = root
@@ -79,6 +118,11 @@ class App:
         self._steps = None
         self._thumbs = []
         self._thumb_anims = []
+        self._tray = None
+        self._tray_hint_shown = False
+        self._paused = None
+        self._label = ""
+        self._cleared = False
         self.worker = None
         self.device_status = ""
         try:
@@ -86,6 +130,7 @@ class App:
             self.device_status = f"Connected · firmware {self.display.firmware()} · layout {layout}"
             self.worker = DeviceWorker(self.display)
             self.worker.start()
+            atexit.register(self._clear_display)  # also covers exits that skip _quit
         except (DeviceError, OSError) as e:
             self.display = None
             self.device_status = f"Preview only · {e}"
@@ -174,12 +219,17 @@ class App:
         ttk.Button(ctrl, text="Clear", width=8, command=lambda: self._playlist_set([])).pack()
         secs = ttk.Frame(ctrl)
         secs.pack(pady=(4, 0))
-        saved = self._load_playlist()
+        saved = self._load_settings()
         self.cycle_secs = tk.IntVar(value=saved.get("seconds", 5))
         tk.Spinbox(secs, from_=1, to=300, width=4, textvariable=self.cycle_secs,
                    command=self._save_playlist).pack(side="left")
         ttk.Label(secs, text="sec").pack(side="left", padx=2)
+        self.tray_on_close = tk.BooleanVar(value=saved.get("tray", True))
         self._playlist_set([n for n in saved.get("items", []) if n in PRESETS], save=False)
+
+        ttk.Checkbutton(left, text="Keep running in the tray when closed", variable=self.tray_on_close,
+                        command=self._save_playlist).pack(anchor="w", pady=(6, 0))
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # right: one long scrollable list of every preset
         right = ttk.Frame(main)
@@ -269,14 +319,27 @@ class App:
 
     def play(self, factory, label):
         self.stop()
+        self._paused = None
         first = factory()
         if isinstance(first, list) and len(first) == 1:
             self.show(first[0][0])
             self._set_status(label)
+            self._refresh_tray()
             return
-        self._factory, self._steps = factory, iter(first)
+        self._factory, self._steps, self._label = factory, iter(first), label
         self._set_status(f"Playing {label}")
         self._tick()
+        self._refresh_tray()
+
+    def toggle_pause(self):
+        if self._paused:
+            factory, label = self._paused
+            self.play(factory, label)
+        elif self._job:
+            self._paused = (self._factory, self._label)
+            self.stop()
+            self._set_status("Paused")
+            self._refresh_tray()
 
     def _tick(self):
         try:
@@ -316,16 +379,19 @@ class App:
 
     # --- playlist -------------------------------------------------------------
 
-    def _load_playlist(self) -> dict:
-        try:
-            return json.loads(CONFIG.read_text())
-        except (OSError, ValueError):
-            return {}
+    def _load_settings(self) -> dict:
+        for path in (CONFIG, OLD_CONFIG):
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                pass
+        return {}
 
     def _save_playlist(self):
         try:
             CONFIG.parent.mkdir(parents=True, exist_ok=True)
-            CONFIG.write_text(json.dumps({"items": self._playlist, "seconds": self._seconds()}))
+            CONFIG.write_text(json.dumps({"items": self._playlist, "seconds": self._seconds(),
+                                          "tray": self.tray_on_close.get()}))
         except OSError:
             pass
 
@@ -359,8 +425,79 @@ class App:
         presets, secs = [PRESETS[n] for n in self._playlist], self._seconds()
         self.play(lambda: playlist(presets, secs), f"playlist ({len(presets)} items, {secs}s each)")
 
+    # --- tray -----------------------------------------------------------------
+
+    def _on_close(self):
+        if self.tray_on_close.get() and self._start_tray():
+            self.root.withdraw()
+        else:
+            self._quit()
+
+    def _start_tray(self) -> bool:
+        try:
+            import pystray
+            from PIL import Image
+        except ImportError:
+            return False
+        icon = Image.new("RGBA", (WIDTH, HEIGHT))
+        icon.putdata([c + ((255,) if any(c) else (0,)) for c in PRESETS["smiley"].thumbnail()])
+        menu = pystray.Menu(
+            pystray.MenuItem("Open app", lambda: self.root.after(0, self._show_window), default=True),
+            pystray.MenuItem(lambda item: "Resume" if self._paused else "Pause",
+                             lambda: self.root.after(0, self.toggle_pause),
+                             enabled=lambda item: bool(self._job or self._paused)),
+            pystray.MenuItem("Close", lambda: self.root.after(0, self._quit)),
+        )
+        self._tray = pystray.Icon("OpenEmote", icon.resize((64, 64), Image.Resampling.NEAREST), "OpenEmote", menu)
+
+        def setup(tray):
+            tray.visible = True
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                tray.notify("Still running here. Right-click the smiley for options.", "OpenEmote")
+            threading.Timer(2.0, _promote_tray_icon).start()
+
+        self._tray.run_detached(setup)
+        return True
+
+    def _refresh_tray(self):
+        if self._tray:
+            self._tray.update_menu()
+
+    def _show_window(self):
+        if self._tray:
+            self._tray.stop()
+            self._tray = None
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def _quit(self):
+        if self._tray:
+            self._tray.stop()
+            self._tray = None
+        self.stop()
+        self._clear_display()
+        self.root.destroy()
+
+    def _clear_display(self):
+        """Turn the LEDs off so the mic doesn't stay frozen on the last frame."""
+        if self.display is None or self._cleared:
+            return
+        self._cleared = True
+        if self.worker:
+            self.worker.shutdown()
+        try:
+            self.display.show(blank())
+            self.display.close()
+        except Exception:
+            pass
+
     def _animate_thumbs(self):
         """Play every visible gallery thumbnail as a little preview."""
+        if self.root.state() == "withdrawn":
+            self.root.after(500, self._animate_thumbs)
+            return
         now = time.monotonic()
         top = self.gallery.canvasy(0)
         bottom = top + self.gallery.winfo_height()
@@ -395,6 +532,15 @@ def run(layout: str = "mirror", brightness: float = 1.0):
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
+        pass
+    try:  # only one copy at a time, otherwise two apps fight over the display
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW(None, False, "OpenEmote.SingleInstance")
+        if ctypes.windll.kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            tk.Tk().withdraw()
+            messagebox.showinfo("OpenEmote", "OpenEmote is already running. Look for it in the system tray.")
+            return
+    except AttributeError:
         pass
     root = tk.Tk()
     App(root, layout, brightness)

@@ -157,11 +157,12 @@ def main(argv=None):
 
     try:
         with EmoteDisplay(layout=args.layout, brightness=brightness) as display:
-            globals()[f"cmd_{args.cmd}"](args, display)
+            try:
+                globals()[f"cmd_{args.cmd}"](args, display)
+            except KeyboardInterrupt:
+                display.show(blank())  # don't leave a frozen animation frame behind
     except DeviceError as e:
         sys.exit(f"Error: {e}")
-    except KeyboardInterrupt:
-        pass
 
 
 if __name__ == "__main__":

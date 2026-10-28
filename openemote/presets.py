@@ -224,8 +224,12 @@ LOVE_R = [
     ".YKKKKY.",
     "..YYYY..",
 ]
-add("love", "Heart eyes", "faces",
-    [(sprite(LOVE_R), 300), (var(LOVE_R, {1: "PYPYYPYP", 2: "PPPYYPPP", 3: "YPYYYYPY"}), 300)])
+LOVE = sprite(LOVE_R)
+LOVE_TINY = var(LOVE_R, {1: ".YYYYYY.", 2: "YRYYYYRY", 3: "YYYYYYYY"})
+LOVE_MID = var(LOVE_R, {1: ".YYYYYY.", 2: "RRRYYRRR", 3: "YRYYYYRY"})
+add("love", "Heart eyes popping", "faces", [
+    (LOVE_TINY, 300), (LOVE_MID, 70), (LOVE, 130), (LOVE_MID, 70), (LOVE, 1000), (LOVE_MID, 70),
+], thumb_step=4)
 
 COOL_R = [
     "..YYYY..",
