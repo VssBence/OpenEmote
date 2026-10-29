@@ -133,7 +133,6 @@ class App:
         self._thumbs = []
         self._thumb_anims = []
         self._tray = None
-        self._tray_hint_shown = False
         self._paused = None
         self._label = ""
         self._cleared = False
@@ -160,7 +159,6 @@ class App:
         else:
             self.flip_button.state(["disabled"])
         if start_hidden:  # launched at login: straight to the tray, play the playlist
-            self._tray_hint_shown = True
             root.after(200, self._start_hidden)
 
     def _start_hidden(self):
@@ -186,21 +184,31 @@ class App:
         style.configure("Status.TLabel", foreground="#8a8a96")
 
         saved = self._load_settings()
-        self.tray_on_close = tk.BooleanVar(value=saved.get("tray", True))
+        self.tray_on_close = tk.BooleanVar(value=saved.get("tray", False))
 
         # top bar: app name + background toggle
         bar = tk.Frame(root, bg="#1e1e26")
         bar.pack(fill="x")
         tk.Label(bar, text="OpenEmote", bg="#1e1e26", fg="#f0f0f4",
                  font=("Segoe UI", 12, "bold")).pack(side="left", padx=12, pady=8)
-        ttk.Button(bar, text="Hide now", command=self._hide_to_tray).pack(side="right", padx=(6, 12))
+        more = tk.Label(bar, text="⋯", bg="#1e1e26", fg="#f0f0f4", font=("Segoe UI", 12), cursor="hand2", padx=6)
+        more.pack(side="right", padx=(0, 8))
+        more.bind("<Button-1>", self._toggle_more)
+        self._more_closed = 0.0
         self.autostart = tk.BooleanVar(value=autostart.enabled())
+        self.start_menu = tk.BooleanVar(value=autostart.in_start_menu())
+        more.menu = tk.Menu(more, tearoff=False, bg="#2a2a34", fg="#f0f0f4", activebackground="#3a3a48",
+                            activeforeground="#ffffff", selectcolor="#2fbf71")
+        more.menu.add_checkbutton(label="Start with Windows", variable=self.autostart,
+                                  command=self._toggle_autostart)
+        more.menu.add_checkbutton(label="Show in Start menu", variable=self.start_menu,
+                                  command=self._toggle_start_menu)
+        self.more = more
         self.show_mute = tk.BooleanVar(value=saved.get("mute", False))
         self.flip_button = ttk.Button(bar, text="Flip", width=5, command=self._flip_mute)
         self.flip_button.pack(side="right", padx=(0, 8))
         Switch(bar, self.show_mute, "Show mute status", self._toggle_mute_watch).pack(side="right", padx=(8, 4))
         Switch(bar, self.tray_on_close, "Run in background when closed", self._save_playlist).pack(side="right", padx=8)
-        Switch(bar, self.autostart, "Start with Windows", self._toggle_autostart).pack(side="right", padx=8)
 
         main = ttk.Frame(root, padding=12)
         main.pack(fill="both", expand=True)
@@ -526,6 +534,21 @@ class App:
             messagebox.showerror("OpenEmote", f"Could not change autostart: {e}")
         self.autostart.set(autostart.enabled())
 
+    def _toggle_more(self, _event=None):
+        # the click that dismisses an open menu also lands here: don't reopen it
+        if time.monotonic() - self._more_closed < 0.3:
+            return
+        m = self.more
+        m.menu.tk_popup(m.winfo_rootx(), m.winfo_rooty() + m.winfo_height())
+        self._more_closed = time.monotonic()
+
+    def _toggle_start_menu(self):
+        try:
+            autostart.set_start_menu(self.start_menu.get())
+        except Exception as e:  # powershell failing raises CalledProcessError, not OSError
+            messagebox.showerror("OpenEmote", f"Could not change the Start menu shortcut: {e}")
+        self.start_menu.set(autostart.in_start_menu())
+
     def _hide_to_tray(self):
         if self._start_tray():
             self.root.withdraw()
@@ -554,14 +577,7 @@ class App:
             pystray.MenuItem("Close", lambda: self.root.after(0, self._quit)),
         )
         self._tray = pystray.Icon("OpenEmote", icon.resize((64, 64), Image.Resampling.NEAREST), "OpenEmote", menu)
-
-        def setup(tray):
-            tray.visible = True
-            if not self._tray_hint_shown:
-                self._tray_hint_shown = True
-                tray.notify("Still running here. Right-click the smiley for options.", "OpenEmote")
-
-        self._tray.run_detached(setup)
+        self._tray.run_detached()
         return True
 
     def _refresh_tray(self):

@@ -22,7 +22,7 @@ on. It only watches the button, never your audio.
 Right-click a few presets and the display cycles through them every few seconds.
 
 **RUNS IN THE BACKGROUND**\
-Close the window and it keeps going from the tray. It can start with Windows too.
+Turn on "Run in background" and closing the window keeps it going from the tray. The ⋯ menu can add it to Windows startup or the Start menu.
 
 **DRAW YOUR OWN**\
 Paint straight onto the mic, live. Or drop in an image or GIF.
